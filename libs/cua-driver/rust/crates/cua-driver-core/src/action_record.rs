@@ -683,7 +683,7 @@ fn transport_from_legacy(
         "x11_pixel" | "x11_pixel_fg" | "x11_xtest_fg" | "xtest" | "xtest_desktop" => {
             ActionTransport::LinuxXTest
         }
-        "wayland_activate" | "wayland_focused" => ActionTransport::LinuxLibei,
+        "wayland_activate" | "wayland_focused" | "kwin_target" => ActionTransport::LinuxLibei,
         "wayland_desktop" => ActionTransport::LinuxWaylandVirtualPointer,
         "cua_compositor_inject" | "wayland_cua_compositor" => {
             ActionTransport::LinuxCuaCompositorInject
@@ -875,9 +875,10 @@ fn actual_delivery_from_legacy(
     }
     match raw_path {
         Some(path) if path.ends_with("_fg") => Some(ActualDelivery::Foreground),
-        Some("hid" | "cgevent_hid" | "SendInput" | "wayland_activate" | "wayland_focused") => {
-            Some(ActualDelivery::Foreground)
-        }
+        Some(
+            "hid" | "cgevent_hid" | "SendInput" | "wayland_activate" | "wayland_focused"
+            | "kwin_target",
+        ) => Some(ActualDelivery::Foreground),
         Some(_) => Some(ActualDelivery::Background),
         None => Some(ActualDelivery::Unknown),
     }

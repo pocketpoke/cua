@@ -31,6 +31,7 @@
 //! containing the target (x, y).
 
 use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::thread;
@@ -424,6 +425,10 @@ pub fn shutdown() {
 #[allow(dead_code)] // fields are keep-alive only; never read
 enum PortalKeepAlive {
     None,
+    Kwin {
+        _rt: tokio::runtime::Runtime,
+        _connection: zbus::Connection,
+    },
     Portal {
         _rt: tokio::runtime::Runtime,
         _proxy: ashpd::desktop::remote_desktop::RemoteDesktop,
@@ -436,17 +441,20 @@ fn worker(rx: Receiver<Cmd>) -> anyhow::Result<()> {
     // that owns the ashpd RemoteDesktop session + its tokio runtime).
     let (context, _portal_keepalive) =
         open_eis_context().map_err(|e| anyhow::anyhow!("failed to obtain EIS connection: {e}"))?;
+    tracing::warn!("cua-libei-worker obtained EIS connection");
 
-    // Phase 2 — handshake. The reis API requires we call context.handshake()
-    // and flush before the event loop starts polling.
-    let _handshake = context.handshake();
-    let _ = context.flush();
+    let handshake = reis::handshake::ei_handshake_blocking(
+        &context,
+        "cua-driver",
+        reis::ei::handshake::ContextType::Sender,
+    )
+    .map_err(|error| anyhow::anyhow!("EIS handshake failed: {error}"))?;
+    tracing::warn!(
+        serial = handshake.serial,
+        interfaces = ?handshake.negotiated_interfaces,
+        "cua-libei-worker completed EIS handshake"
+    );
 
-    // Phase 3 — run the calloop event loop. We use a calloop Generic source
-    // wrapping the ei::Context's underlying socket so the loop wakes up on
-    // EIS messages. The command channel is polled at the top of each loop
-    // iteration. `_portal_keepalive` stays bound until this fn returns — i.e.
-    // across the entire loop — so the portal session is never dropped early (#2105).
     run_calloop(context, rx)
 }
 
@@ -458,6 +466,14 @@ fn open_eis_context() -> anyhow::Result<(reis::ei::Context, PortalKeepAlive)> {
     {
         // Direct $LIBEI_SOCKET fast path: no portal session to keep alive.
         return Ok((ctx, PortalKeepAlive::None));
+    }
+
+    if super::kwin_helper::is_kwin_session() {
+        let (stream, cookie, keepalive) = open_kwin_eis_socket()?;
+        tracing::debug!(cookie, "using KWin direct EIS socket");
+        let ctx = reis::ei::Context::new(stream)
+            .map_err(|e| anyhow::anyhow!("reis KWin EIS Context::new failed: {e}"))?;
+        return Ok((ctx, keepalive));
     }
 
     // Portal RemoteDesktop fallback.
@@ -541,6 +557,48 @@ fn open_eis_context() -> anyhow::Result<(reis::ei::Context, PortalKeepAlive)> {
     ))
 }
 
+/// Open KWin's compositor-owned EIS endpoint without going through the
+/// RemoteDesktop portal. Capabilities 3 requests pointer + keyboard input.
+fn open_kwin_eis_socket() -> anyhow::Result<(UnixStream, i32, PortalKeepAlive)> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build KWin EIS runtime: {e}"))?;
+    let (fd, cookie, connection): (zbus::zvariant::OwnedFd, i32, zbus::Connection) =
+        rt.block_on(async {
+            let connection = zbus::Connection::session()
+                .await
+                .map_err(|e| anyhow::anyhow!("KWin EIS session bus unavailable: {e}"))?;
+            let message = connection
+                .call_method(
+                    Some("org.kde.KWin"),
+                    "/org/kde/KWin/EIS/RemoteDesktop",
+                    Some("org.kde.KWin.EIS.RemoteDesktop"),
+                    "connectToEIS",
+                    &(3i32,),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("KWin connectToEIS failed: {e}"))?;
+            message
+                .body()
+                .deserialize::<(zbus::zvariant::OwnedFd, i32)>()
+                .map(|(fd, cookie)| (fd, cookie, connection))
+                .map_err(|e| anyhow::anyhow!("invalid KWin connectToEIS response: {e}"))
+        })?;
+    let std_fd: std::os::fd::OwnedFd = fd.into();
+    let stream = UnixStream::from(std_fd);
+    tracing::warn!(cookie, "opened direct KWin EIS socket");
+    Ok((
+        stream,
+        cookie,
+        PortalKeepAlive::Kwin {
+            _rt: rt,
+            _connection: connection,
+        },
+    ))
+}
+
 // ── calloop dispatch ────────────────────────────────────────────────────
 //
 // The EIS protocol is event-driven and non-trivial — handshake → connection
@@ -552,12 +610,31 @@ fn open_eis_context() -> anyhow::Result<(reis::ei::Context, PortalKeepAlive)> {
 // click/move/type via the negotiated pointer/keyboard/text interfaces.
 // Region selection picks the first announced ei_device::Region.
 
+fn drain_pending_eis_events(state: &mut EisState, context: &reis::ei::Context) {
+    use reis::PendingRequestResult;
+    while let Some(result) = context.pending_event() {
+        if let PendingRequestResult::Request(event) = result {
+            state.dispatch_eis_event(event);
+        }
+    }
+    let _ = context.flush();
+}
+
 fn run_calloop(context: reis::ei::Context, rx: Receiver<Cmd>) -> anyhow::Result<()> {
     use calloop::{generic::Generic, EventLoop, Interest, Mode};
 
     let mut event_loop: EventLoop<EisState> = EventLoop::try_new()
         .map_err(|e| anyhow::anyhow!("calloop EventLoop::try_new failed: {e}"))?;
     let handle = event_loop.handle();
+
+    // `ei_handshake_blocking` returns as soon as it sees the connection event.
+    // KWin may already have queued the following seat/device events in the same
+    // read. Drain those pending events before handing the fd to calloop; otherwise
+    // the kernel fd is no longer readable and the queued events can strand the
+    // worker before any device becomes ready.
+    let mut state = EisState::default();
+    state.context = Some(context.clone());
+    drain_pending_eis_events(&mut state, &context);
 
     // EIS protocol source.
     let ctx_source = Generic::new(context, Interest::READ, Mode::Level);
@@ -566,8 +643,6 @@ fn run_calloop(context: reis::ei::Context, rx: Receiver<Cmd>) -> anyhow::Result<
             state.handle_eis_readable(unsafe { ctx.get_mut() })
         })
         .map_err(|e| anyhow::anyhow!("calloop insert_source(eis) failed: {e}"))?;
-
-    let mut state = EisState::default();
 
     // Inbound commands can arrive before the EIS handshake has negotiated a
     // usable input device — seat → device → interface → Resumed is async and
@@ -689,7 +764,8 @@ impl EisState {
         if self.context.is_none() {
             self.context = Some(context.clone());
         }
-        if context.read().is_err() {
+        if let Err(error) = context.read() {
+            tracing::warn!(?error, "EIS context read failed");
             return Ok(calloop::PostAction::Remove);
         }
         while let Some(result) = context.pending_event() {
@@ -708,6 +784,7 @@ impl EisState {
         match event {
             Event::Handshake(handshake, ev) => {
                 if let reis::ei::handshake::Event::HandshakeVersion { .. } = ev {
+                    tracing::warn!("EIS handshake version received");
                     handshake.handshake_version(1);
                     handshake.name("cua-driver");
                     handshake.context_type(reis::ei::handshake::ContextType::Sender);
@@ -739,11 +816,13 @@ impl EisState {
             }
             Event::Connection(_conn, ev) => match ev {
                 reis::ei::connection::Event::Seat { seat } => {
+                    tracing::warn!("EIS connection announced seat");
                     self.seats.insert(seat, SeatData::default());
                 }
                 // The EIS server pings to check liveness; failing to answer
                 // makes it drop the connection. Mirror reis's examples.
                 reis::ei::connection::Event::Ping { ping } => {
+                    tracing::warn!("EIS connection ping");
                     ping.done(0);
                 }
                 _ => {}
@@ -752,9 +831,11 @@ impl EisState {
                 let data = self.seats.entry(seat.clone()).or_default();
                 match ev {
                     reis::ei::seat::Event::Capability { mask, interface } => {
+                        tracing::warn!(%interface, mask, "EIS seat capability");
                         data.capabilities.insert(interface, mask);
                     }
                     reis::ei::seat::Event::Done => {
+                        tracing::warn!(capabilities = ?data.capabilities, "EIS seat done; binding capabilities");
                         // Bind every input capability the seat advertises
                         // (pointer / pointer_absolute / button / scroll /
                         // keyboard / text). The server then announces
@@ -777,6 +858,7 @@ impl EisState {
                         }
                     }
                     reis::ei::seat::Event::Device { device } => {
+                        tracing::warn!("EIS seat announced device");
                         self.devices.insert(device, DeviceData::default());
                     }
                     _ => {}
@@ -792,9 +874,11 @@ impl EisState {
                 let data = self.devices.entry(device.clone()).or_default();
                 match ev {
                     reis::ei::device::Event::DeviceType { device_type } => {
+                        tracing::warn!(?device_type, "EIS device type");
                         data.device_type = Some(device_type);
                     }
                     reis::ei::device::Event::Interface { object } => {
+                        tracing::warn!(interface = object.interface(), "EIS device interface");
                         data.interfaces
                             .insert(object.interface().to_owned(), object);
                     }
@@ -805,6 +889,7 @@ impl EisState {
                         hight,
                         scale: _,
                     } => {
+                        tracing::warn!(offset_x, offset_y, width, hight, "EIS device region");
                         // reis 0.7 keeps the misspelled "hight" field name
                         // for ABI compatibility — see the protocol comment.
                         if width > 0 && hight > 0 {
@@ -817,6 +902,7 @@ impl EisState {
                         }
                     }
                     reis::ei::device::Event::Resumed { serial } => {
+                        tracing::warn!(serial, "EIS device resumed");
                         data.resumed = true;
                         data.resumed_serial = Some(serial);
                         self.last_serial = serial;
@@ -826,9 +912,10 @@ impl EisState {
                         // libei's reference client: start on Resumed and keep it
                         // active until the device is paused or disconnected.
                         self.sequence = self.sequence.wrapping_add(1);
-                        device.start_emulating(serial, self.sequence);
+                        device.start_emulating(self.sequence, serial);
                     }
                     reis::ei::device::Event::Paused { serial } => {
+                        tracing::warn!(serial, "EIS device paused");
                         data.resumed = false;
                         data.resumed_serial = None;
                         self.last_serial = serial;
@@ -1173,9 +1260,10 @@ impl EisState {
         Ok(())
     }
 
-    /// Pick a pointer device whose announced Region contains `(x, y)`,
-    /// and translate the absolute screen coordinates into the device's
-    /// region-local pixel coordinates.
+    /// Pick a pointer device whose announced Region contains `(x, y)`.
+    /// EIS regions are expressed in the compositor's desktop coordinate layout;
+    /// send the global point unchanged. Subtracting the region offset would
+    /// silently route a click on monitor N to the same local point on monitor 0.
     ///
     /// Multi-monitor seats announce one Region per output; routing each
     /// (x, y) by containment is what lets a click on monitor #2 actually
@@ -1195,9 +1283,7 @@ impl EisState {
             }
             for region in &data.regions {
                 if region.contains(x, y) {
-                    let rel_x = x as f32 - region.offset_x;
-                    let rel_y = y as f32 - region.offset_y;
-                    return Ok((device.clone(), rel_x, rel_y));
+                    return Ok((device.clone(), x as f32, y as f32));
                 }
             }
         }
@@ -1213,15 +1299,16 @@ impl EisState {
     }
 
     /// Region-local coordinates for absolute `(x, y)` within one of `device`'s
-    /// announced regions, or `None` when no region of that device contains the
+    /// regions, or `None` when no region of that device contains the
     /// point. Used to map a drag endpoint into the same device the drag start
-    /// resolved to (a single EIS emulation session can't span devices).
+    /// resolved to (a single EIS emulation session can't span devices). The
+    /// returned coordinates remain global EIS desktop coordinates.
     fn region_local_on(&self, device: &reis::ei::Device, x: f64, y: f64) -> Option<(f32, f32)> {
         let data = self.devices.get(device)?;
         data.regions
             .iter()
             .find(|r| r.contains(x, y))
-            .map(|r| (x as f32 - r.offset_x, y as f32 - r.offset_y))
+            .map(|_r| (x as f32, y as f32))
     }
 
     /// The negotiated device that exposes `iface` (e.g. `ei_pointer_absolute`,

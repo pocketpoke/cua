@@ -12,6 +12,8 @@
 
 pub mod ext_screencopy;
 pub mod ext_toplevel;
+#[cfg(target_os = "linux")]
+pub mod kwin_helper;
 pub mod overlay;
 pub mod persistent_vptr;
 pub(crate) mod portal;
@@ -108,6 +110,21 @@ pub fn is_wayland() -> bool {
 /// the `wayland::*` input functions, not from XWayland's `DISPLAY` variable.
 pub fn wayland_input_enabled() -> bool {
     wayland_enabled() && std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+/// KDE/Plasma's KWin helper is the only target-addressable route on this
+/// compositor. Keeping this predicate separate prevents desktop-scoped
+/// operations from accidentally entering the exact-window transaction.
+pub fn kwin_target_input_available(pid: u32, window_id: u64) -> bool {
+    kwin_helper::is_kwin_session()
+        && kwin_helper::available()
+        && kwin_helper::list_windows(Some(pid)).is_some_and(|windows| {
+            windows
+                .iter()
+                .filter(|window| window.xid == window_id)
+                .count()
+                == 1
+        })
 }
 
 /// Reason string when X11 input injection cannot possibly work, so callers
@@ -1172,6 +1189,14 @@ pub fn activate_window_for_input_target(
     window_id: u64,
     target_pid: Option<u32>,
 ) -> anyhow::Result<()> {
+    if kwin_helper::is_kwin_session() {
+        let pid = target_pid.ok_or_else(|| {
+            anyhow::anyhow!(
+                "foreground_unavailable: KWin requires a verified target pid for window {window_id}"
+            )
+        })?;
+        return kwin_helper::activate_window(pid, window_id);
+    }
     if is_inject_mode() {
         let pid = target_pid.ok_or_else(|| {
             anyhow::anyhow!(
@@ -1226,6 +1251,9 @@ pub fn with_target_foreground<T>(
     window_id: u64,
     body: impl FnOnce() -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    if kwin_helper::is_kwin_session() {
+        return kwin_helper::with_focused_window(pid, window_id, body);
+    }
     if let Some(window) = sway_ipc::window_for_id(window_id) {
         if window.pid != pid {
             anyhow::bail!(
@@ -1307,6 +1335,12 @@ fn event_time_ms() -> u32 {
 /// real coords. A short delay between iterations gives the compositor time
 /// to discriminate single vs. double clicks.
 pub fn click(window_id: u64, x: i32, y: i32, count: u32, button: u8) -> anyhow::Result<()> {
+    if kwin_helper::is_kwin_session() {
+        let pid = kwin_helper::pid_for_window(window_id)?;
+        return kwin_helper::with_focused_window(pid, window_id, || {
+            kwin_click_focused(x, y, count, button)
+        });
+    }
     with_libei_fallback(
         || click_vptr(Some(window_id), x, y, count, button),
         || {
@@ -1314,6 +1348,21 @@ pub fn click(window_id: u64, x: i32, y: i32, count: u32, button: u8) -> anyhow::
             activate_window_for_input(window_id)?;
             libei_click(x, y, count, button)
         },
+    )
+}
+
+/// Send target-bound pointer input while KWin's exact foreground transaction
+/// is already active. Desktop-scoped callers must not use this route.
+#[cfg(feature = "portal-input")]
+fn kwin_click_focused(x: i32, y: i32, count: u32, button: u8) -> anyhow::Result<()> {
+    libei_wait_pointer_ready()?;
+    libei_click(x, y, count, button)
+}
+
+#[cfg(not(feature = "portal-input"))]
+fn kwin_click_focused(_x: i32, _y: i32, _count: u32, _button: u8) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "foreground_unavailable: KWin target input requires a portal-input build; no input was sent"
     )
 }
 
@@ -1396,6 +1445,9 @@ pub fn window_local_to_output(window_id: u64, x: i32, y: i32) -> (i32, i32) {
 /// object ID came from an earlier Wayland connection. Protocol object IDs are
 /// connection-local, so direct equality is only a fast path.
 pub fn window_geometry(window_id: u64) -> Option<(i32, i32, u32, u32)> {
+    if kwin_helper::is_kwin_session() {
+        return kwin_helper::geometry_for_window(window_id);
+    }
     if let Some(window) = sway_ipc::window_for_id(window_id) {
         return Some((window.x, window.y, window.width, window.height));
     }
@@ -2094,9 +2146,16 @@ fn libei_wait_keyboard_ready() -> anyhow::Result<()> {
 #[cfg(feature = "portal-input")]
 fn libei_click(x: i32, y: i32, count: u32, button: u8) -> anyhow::Result<()> {
     let btn = cua_button_to_libei(button);
-    let (w, h) = output_dimensions()?;
-    let (px, py) = normalize_click_xy(x, y, w, h);
-    libei::move_absolute(px as f64, py as f64)?;
+    // Keep explicit coordinates in the seat's global logical space. The EIS
+    // worker selects the announced monitor region containing the point; clamping
+    // here to the first wl_output would misroute targets on monitor 2+. Preserve
+    // the historical (0,0) -> centre behavior only for coordinate-free clicks.
+    let (px, py) = if x == 0 && y == 0 {
+        let (w, h) = output_dimensions()?;
+        ((w / 2) as i32, (h / 2) as i32)
+    } else {
+        (x, y)
+    };
     for i in 0..count.max(1) {
         if i > 0 {
             std::thread::sleep(std::time::Duration::from_millis(80));
@@ -2926,6 +2985,11 @@ fn wayland_atspi_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
 
 /// Window-enumeration dispatcher: native Wayland when available, else X11.
 pub fn list_windows_dispatch(filter_pid: Option<u32>) -> Vec<WindowInfo> {
+    if kwin_helper::is_kwin_session() {
+        if let Some(windows) = kwin_helper::list_windows(filter_pid) {
+            return windows;
+        }
+    }
     if wayland_enabled() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
         // Prefer the richer wlroots protocol. The generic staging protocol is
         // only consulted when wlroots yields no windows (including when its

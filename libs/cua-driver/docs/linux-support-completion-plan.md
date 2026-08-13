@@ -247,6 +247,13 @@ Work independently of the custom-compositor lane.
   input.
 - Use Plasma 6; do not accept the broken Plasma 5.27 cloud image as evidence.
 
+The current local evaluation confirms that KWin declarative scripts provide
+window inspection/mutation plus outbound `callDBus`, but no custom D-Bus
+service registration or config-write API. A script-only bidirectional control
+plane is therefore not available. The prototype bridge remains isolated until
+an explicitly built session-bus service can publish a live capability
+handshake, snapshots, activation responses, and restoration proof.
+
 ### Real Xorg
 
 - Add an optional maintainer lane for MPX/uinput and parallel pointer behavior.

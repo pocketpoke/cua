@@ -1,0 +1,14 @@
+{
+  "KPlugin": {
+    "Id": "cua-kwin-helper",
+    "Name": "cua KWin Helper",
+    "Description": "Experimental bridge-dependent exact-target helper for cua-driver on KDE Plasma 6 Wayland",
+    "Version": "0.1.0",
+    "License": "MIT",
+    "EnabledByDefault": false
+  },
+  "X-Plasma-API": "javascript",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "X-Plasma-MainScript": "code/main.js",
+  "KPackageStructure": "KWin/Script"
+}

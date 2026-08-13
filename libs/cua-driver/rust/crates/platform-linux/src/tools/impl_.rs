@@ -1507,7 +1507,7 @@ fn type_text_structured(path: &str, characters: usize, verified: bool) -> Value 
         "verified": verified,
         "effect": if verified { "confirmed" } else { "unverifiable" },
     });
-    if !verified && path != "key_events_fg" {
+    if !verified && path != "key_events_fg" && path != "kwin_target" {
         s["escalation"] = json!({
             "recommended": "foreground",
             "reason": "background insert could not be confirmed — re-call with \
@@ -2575,11 +2575,11 @@ impl Tool for ClickTool {
                 if !delivery.is_foreground() {
                     return Ok("background_unavailable");
                 }
-                // Native Wayland: focus+raise the target toplevel
-                // (foreign-toplevel `activate`), then drive `count` virtual-pointer
-                // button events. Wayland injection routes to the compositor focus.
+                // KDE/KWin: the helper owns the exact PID/window focus
+                // proof and restores the previous focus after the
+                // target-bound pointer transaction.
                 crate::wayland::click(xid, output_x, output_y, count as u32, button)?;
-                return Ok("wayland_activate");
+                return Ok("kwin_target");
             }
             // X11 injection. Tiered no-focus-steal delivery (background):
             //   1. Plain left single-click → AT-SPI doAction at that point.
@@ -2848,14 +2848,16 @@ impl Tool for TypeTextTool {
         };
         let xid_opt = args.opt_u64("window_id").or(resolved_window_id);
 
-        // Resolve XID: use window_id if given, else first window for pid.
+        // Resolve the compositor-owned target if window_id is omitted. KWin's
+        // IDs are not X11 IDs, so never consult the X11 registry on KDE.
         let xid = match xid_opt {
             Some(x) => x,
             None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::x11::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
+                let windows = tokio::task::spawn_blocking(move || {
+                    crate::wayland::list_windows_dispatch(Some(pid))
+                })
+                .await
+                .unwrap_or_default();
                 match windows.first() {
                     Some(w) => w.xid,
                     None => {
@@ -3075,7 +3077,11 @@ impl Tool for TypeTextTool {
                     "Typed {text_len} character(s) (via Wayland virtual-keyboard)."
                 ))
                 .with_structured(type_text_structured(
-                    "key_events",
+                    if crate::wayland::wayland_input_enabled() {
+                        "kwin_target"
+                    } else {
+                        "key_events"
+                    },
                     text_len,
                     false,
                 )),
@@ -3474,13 +3480,16 @@ impl Tool for PressKeyTool {
             }
             cua_driver_core::element_token::ResolvedElement::None => None,
         };
+        // Resolve the compositor-owned target if window_id is omitted. KWin's
+        // IDs are not X11 IDs, so never consult the X11 registry on KDE.
         let xid = match xid_opt {
             Some(x) => x,
             None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::x11::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
+                let windows = tokio::task::spawn_blocking(move || {
+                    crate::wayland::list_windows_dispatch(Some(pid))
+                })
+                .await
+                .unwrap_or_default();
                 match windows.first() {
                     Some(w) => w.xid,
                     None => {
@@ -3604,7 +3613,13 @@ impl Tool for PressKeyTool {
             return match result {
                 Ok(Ok(())) => ToolResult::text(format!(
                     "Pressed key '{key}' (via Wayland virtual-keyboard)."
-                )),
+                ))
+                .with_structured(json!({
+                    "path": "kwin_target",
+                    "verified": false,
+                    "delivery_mode": "foreground",
+                    "effect": "unverifiable"
+                })),
                 Ok(Err(e)) => ToolResult::error(e.to_string()),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             };
@@ -3790,14 +3805,16 @@ impl Tool for HotkeyTool {
             cua_driver_core::element_token::ResolvedElement::None => window_id_arg,
         };
 
-        // Resolve XID: use window_id if given, else first window for pid.
+        // Resolve the compositor-owned target if window_id is omitted. KWin's
+        // IDs are not X11 IDs, so never consult the X11 registry on KDE.
         let xid = match xid_opt {
             Some(x) => x,
             None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::x11::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
+                let windows = tokio::task::spawn_blocking(move || {
+                    crate::wayland::list_windows_dispatch(Some(pid))
+                })
+                .await
+                .unwrap_or_default();
                 match windows.first() {
                     Some(w) => w.xid,
                     None => {
@@ -3966,7 +3983,9 @@ impl Tool for HotkeyTool {
                 // state-mask path. window_id is irrelevant once focused.
                 let mut combo: Vec<String> = mods_for_wayland.clone();
                 combo.push(key_for_wayland.clone());
-                return crate::wayland::hotkey(xid, &combo);
+                return crate::wayland::with_target_foreground(pid, xid, || {
+                    crate::wayland::hotkey_focused(&combo)
+                });
             }
             let m: Vec<&str> = mods.iter().map(String::as_str).collect();
             // foreground: activate the target first, then inject the accelerator
@@ -3994,7 +4013,12 @@ impl Tool for HotkeyTool {
             Ok(Ok(())) => ToolResult::text(format!(
                 "Pressed {key_display} on pid {pid} (delivery_mode={mode_label})."
             ))
-            .with_structured(json!({ "verified": false, "delivery_mode": mode_label })),
+            .with_structured(json!({
+                "path": if crate::wayland::wayland_input_enabled() { "kwin_target" } else { "key_events_fg" },
+                "verified": false,
+                "delivery_mode": mode_label,
+                "effect": "unverifiable"
+            })),
             Ok(Err(e)) => ToolResult::error(e.to_string()),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
@@ -4189,14 +4213,16 @@ impl Tool for ScrollTool {
             cua_driver_core::element_token::ResolvedElement::None => args.opt_u64("window_id"),
         };
 
-        // Resolve XID: use window_id if given, else first window for pid.
+        // Resolve the compositor-owned target if window_id is omitted. KWin's
+        // IDs are not X11 IDs, so never consult the X11 registry on KDE.
         let xid = match xid_opt {
             Some(x) => x,
             None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::x11::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
+                let windows = tokio::task::spawn_blocking(move || {
+                    crate::wayland::list_windows_dispatch(Some(pid))
+                })
+                .await
+                .unwrap_or_default();
                 match windows.first() {
                     Some(w) => w.xid,
                     None => {
@@ -7745,10 +7771,11 @@ impl Tool for BringToFrontTool {
         let xid = match args.opt_u64("window_id") {
             Some(x) => x,
             None => {
-                let windows =
-                    tokio::task::spawn_blocking(move || crate::x11::list_windows(Some(pid)))
-                        .await
-                        .unwrap_or_default();
+                let windows = tokio::task::spawn_blocking(move || {
+                    crate::wayland::list_windows_dispatch(Some(pid))
+                })
+                .await
+                .unwrap_or_default();
                 match windows.first() {
                     Some(w) => w.xid,
                     None => {

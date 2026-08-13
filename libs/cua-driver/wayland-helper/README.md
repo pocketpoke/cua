@@ -63,6 +63,58 @@ focused Shell window is restored and verified.
 wlroots compositors such as Sway and labwc do not need it: cua-driver uses
 foreign-toplevel activation, virtual-pointer input, and layer-shell there.
 
-KDE Plasma Wayland needs an equivalent target-addressable KWin activation
-adapter; it is not yet provided. Portal reachability alone is insufficient
-because RemoteDesktop/libei input is global to the compositor focus.
+## KDE Plasma 6 / KWin status
+
+KDE Plasma Wayland is not currently a supported focus-bound input route. The
+production driver deliberately does not load or consult the local KWin files
+below, so portal/libei input cannot be sent on the basis of stale config or a
+partial script load. It continues to refuse when no trusted target-addressable
+adapter can prove the target and restore the previous focus.
+
+The installed KWin 6.7.1 API was re-checked locally. Declarative scripts expose
+`Workspace.windowList`, `Workspace.activeWindow`, `readConfig`, and outbound
+`callDBus`. They do not expose `writeConfig`, a custom D-Bus service/object
+registration API, or an inbound callback endpoint. KWin's own D-Bus API exposes
+fixed scripting/window-manager methods; it does not route arbitrary requests to
+a script. Therefore a declarative script alone cannot make the required
+bidirectional capability/snapshot/request/response channel.
+
+The checkout keeps an explicitly experimental, isolated prototype for the
+missing bridge so the protocol is not mistaken for runtime support:
+
+- KWin package: `kwin-cua-helper/`
+- Rust client prototype (not imported by `wayland/mod.rs`):
+  `platform-linux/src/wayland/kwin_helper.rs`
+- Guarded installer: `./install-kwin.sh`
+- Read-only/live proof probe: `./probe-kwin.sh`
+- Opt-in bridge target: `platform-linux/src/bin/kwin-helper-bridge.rs`
+
+The prototype's `callDBus` publication lane requires a running
+`org.cua.KWinHelper` process. `kwriteconfig6` can carry requests into the
+script, but the script cannot write the response back to config by itself. No
+KDE foreground input is allowed until a real capability handshake, exact
+`(pid, window_id)` ownership match, target-focus confirmation, and previous
+focus restoration confirmation all succeed. The activation probe is
+intentionally not run by the driver or its tests.
+
+Minimum bridge prerequisite for a future supported implementation:
+
+1. Enter a working Rust/Nix environment with all locked sources available.
+2. Build the opt-in target without relying on an automatic download:
+
+   ```text
+   nix develop --command cargo build --release -p platform-linux \
+     --features kwin-helper-bridge --bin kwin-helper-bridge
+   ```
+
+3. Run the resulting `kwin-helper-bridge` on the same Plasma session bus,
+   install/load the KWin package, and use `probe-kwin.sh` to verify the live
+   capability publication and exact activation/restore transaction. Only then
+   can the production adapter be reconsidered.
+
+This checkout cannot complete that prerequisite: `cargo` and `rustc` are not
+installed in the current shell, the Python D-Bus modules are absent, and the
+offline Nix-shell probe cannot instantiate its local fetcher cache here. The
+known online Nix dependency fetch is also failing with HTTP 502. No prebuilt
+bridge exists. Consequently this checkout makes no claim that KWin clicks or
+focus-bound input work.
