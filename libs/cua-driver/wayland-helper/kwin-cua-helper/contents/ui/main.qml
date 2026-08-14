@@ -6,7 +6,19 @@ Item {
     id: scriptRoot
 
     DBusCall {
-        id: bridgeCall
+        id: capabilitiesCall
+        service: "org.cua.KWinHelper"
+        path: "/org/cua/KWinHelper"
+    }
+
+    DBusCall {
+        id: snapshotCall
+        service: "org.cua.KWinHelper"
+        path: "/org/cua/KWinHelper"
+    }
+
+    DBusCall {
+        id: responseCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
     }
@@ -19,9 +31,15 @@ Item {
                 return KWin.readConfig(key, fallback);
             },
             "callDBus": function(method, value) {
-                bridgeCall.method = "org.cua.KWinHelper." + method;
-                bridgeCall.arguments = [String(value || "")];
-                bridgeCall.call();
+                var call = capabilitiesCall;
+                if (method === "PublishSnapshot") {
+                    call = snapshotCall;
+                } else if (method === "PublishResponse") {
+                    call = responseCall;
+                }
+                call.method = "org.cua.KWinHelper." + method;
+                call.arguments = [String(value || "")];
+                call.call();
                 console.log("CUA_KWIN_HELPER: published " + method);
             },
             "scriptRoot": scriptRoot
