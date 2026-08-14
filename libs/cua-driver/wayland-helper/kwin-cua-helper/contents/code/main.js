@@ -412,9 +412,10 @@ function main(api) {
         bindSnapshotSignals(clients[i]);
     }
 
-    // Legacy KWin JS has no timer API. Process a request already present in
-    // kwinrc synchronously at startup; subsequent requests arrive through the
-    // options.configChanged signal above.
+    // Keep the capability record fresh as well as the snapshot. This also
+    // covers the short race where the QML DBusCall object is not ready during
+    // Component.onCompleted.
+    retryPublication();
     pollRequests();
 }
 
