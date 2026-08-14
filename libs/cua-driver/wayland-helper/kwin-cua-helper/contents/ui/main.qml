@@ -19,7 +19,7 @@ Item {
                 return KWin.readConfig(key, fallback);
             },
             "callDBus": function(method, value) {
-                bridgeCall.method = method;
+                bridgeCall.method = "org.cua.KWinHelper." + method;
                 bridgeCall.arguments = [String(value || "")];
                 bridgeCall.call();
                 console.log("CUA_KWIN_HELPER: published " + method);
