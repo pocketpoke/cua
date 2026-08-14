@@ -5203,7 +5203,17 @@ impl Tool for DragTool {
                     (to_x.round() as i32, to_y.round() as i32),
                 ));
                 tokio::task::spawn_blocking(move || {
-                    crate::wayland::drag(xid, fxi, fyi, txi, tyi, steps_u32, duration_ms, button)
+                    crate::wayland::drag(
+                        pid,
+                        xid,
+                        fxi,
+                        fyi,
+                        txi,
+                        tyi,
+                        steps_u32,
+                        duration_ms,
+                        button,
+                    )
                 })
             };
             let ((from_output_x, from_output_y), (to_output_x, to_output_y)) = wayland_points

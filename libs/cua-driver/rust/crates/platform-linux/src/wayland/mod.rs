@@ -1653,6 +1653,7 @@ fn move_cursor_absolute_vptr(window_id: Option<u64>, x: i32, y: i32) -> anyhow::
 /// output-relative; window-local coords need the nested cua-compositor
 /// injection socket (`CUA_INJECT_SOCKET`).
 pub fn drag(
+    pid: u32,
     window_id: u64,
     from_x: i32,
     from_y: i32,
@@ -1662,6 +1663,13 @@ pub fn drag(
     duration_ms: u64,
     button: u8,
 ) -> anyhow::Result<()> {
+    if kwin_helper::is_kwin_session() {
+        return kwin_helper::with_focused_window(pid, window_id, || {
+            libei_wait_pointer_ready()?;
+            libei_drag(from_x, from_y, to_x, to_y, steps, duration_ms, button)
+        });
+    }
+
     with_libei_fallback(
         || drag_vptr(Some(window_id), from_x, from_y, to_x, to_y, steps, button),
         || {
