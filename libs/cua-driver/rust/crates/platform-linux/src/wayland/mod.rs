@@ -2203,13 +2203,11 @@ fn libei_scroll(direction: &str, amount: u32) -> anyhow::Result<()> {
 
 #[cfg(feature = "portal-input")]
 fn libei_move_absolute(x: i32, y: i32) -> anyhow::Result<()> {
-    // Match `move_cursor_absolute_vptr`: clamp to output bounds (no
-    // default-to-centre — an explicit (0,0) move means the top-left corner).
-    let (w, h) = output_dimensions()?;
-    let px = x.clamp(0, (w as i32).saturating_sub(1));
-    let py = y.clamp(0, (h as i32).saturating_sub(1));
-    libei::move_absolute(px as f64, py as f64)?;
-    record_synth_cursor(px, py);
+    // Explicit coordinates are already in the compositor's global logical
+    // space. Do not clamp them to the first wl_output: on a multi-monitor
+    // desktop that would pin monitor-2/3 input to the edge of monitor 1.
+    libei::move_absolute(x as f64, y as f64)?;
+    record_synth_cursor(x, y);
     Ok(())
 }
 
