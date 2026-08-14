@@ -9,21 +9,21 @@ Item {
         id: capabilitiesCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
-        interface: "org.cua.KWinHelper"
+        interfaceName: "org.cua.KWinHelper"
     }
 
     DBusCall {
         id: snapshotCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
-        interface: "org.cua.KWinHelper"
+        interfaceName: "org.cua.KWinHelper"
     }
 
     DBusCall {
         id: responseCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
-        interface: "org.cua.KWinHelper"
+        interfaceName: "org.cua.KWinHelper"
     }
 
     Component.onCompleted: {
