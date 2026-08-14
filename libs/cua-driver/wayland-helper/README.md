@@ -65,11 +65,14 @@ foreign-toplevel activation, virtual-pointer input, and layer-shell there.
 
 ## KDE Plasma 6 / KWin status
 
-KDE Plasma Wayland is not currently a supported focus-bound input route. The
-production driver deliberately does not load or consult the local KWin files
-below, so portal/libei input cannot be sent on the basis of stale config or a
-partial script load. It continues to refuse when no trusted target-addressable
-adapter can prove the target and restore the previous focus.
+KDE Plasma Wayland has an explicitly opt-in experimental focus-bound input
+route. The production adapter consults the KWin helper only when the bridge
+owns its D-Bus name, KWin reports the helper script as loaded, and the
+versioned capability/snapshot records parse successfully. It then requires an
+exact `(pid, window_id)` ownership match, target-focus confirmation, and
+previous-focus restoration confirmation before sending bounded input.
+Without that complete handshake, cua-driver refuses instead of relying on
+stale `kwinrc` records or whichever window happens to be focused.
 
 The installed KWin 6.7.1 API was re-checked locally. Declarative scripts expose
 `Workspace.windowList`, `Workspace.activeWindow`, `readConfig`, and outbound
@@ -79,15 +82,14 @@ fixed scripting/window-manager methods; it does not route arbitrary requests to
 a script. Therefore a declarative script alone cannot make the required
 bidirectional capability/snapshot/request/response channel.
 
-The checkout keeps an explicitly experimental, isolated prototype for the
-missing bridge so the protocol is not mistaken for runtime support:
+The checkout keeps the explicit bridge path as an opt-in experimental route:
 
 - KWin package: `kwin-cua-helper/`
-- Rust client prototype (not imported by `wayland/mod.rs`):
-  `platform-linux/src/wayland/kwin_helper.rs`
+- Rust KWin client: `platform-linux/src/wayland/kwin_helper.rs`
 - Guarded installer: `./install-kwin.sh`
 - Read-only/live proof probe: `./probe-kwin.sh`
-- Opt-in bridge target: `platform-linux/src/bin/kwin-helper-bridge.rs`
+- Bridge target: `platform-linux/src/bin/kwin-helper-bridge.rs`
+- Nix outputs: `kwin-helper` and `kwin-helper-bridge`
 
 The prototype's `callDBus` publication lane requires a running
 `org.cua.KWinHelper` process. `kwriteconfig6` can carry requests into the
@@ -107,14 +109,12 @@ Minimum bridge prerequisite for a future supported implementation:
      --features kwin-helper-bridge --bin kwin-helper-bridge
    ```
 
-3. Run the resulting `kwin-helper-bridge` on the same Plasma session bus,
-   install/load the KWin package, and use `probe-kwin.sh` to verify the live
-   capability publication and exact activation/restore transaction. Only then
-   can the production adapter be reconsidered.
+`probe-kwin.sh` verifies the live capability publication and exact
+activation/restore transaction before a host relies on focus-bound input. The
+route remains disabled unless that live handshake is present.
 
-This checkout cannot complete that prerequisite: `cargo` and `rustc` are not
-installed in the current shell, the Python D-Bus modules are absent, and the
-offline Nix-shell probe cannot instantiate its local fetcher cache here. The
-known online Nix dependency fetch is also failing with HTTP 502. No prebuilt
-bridge exists. Consequently this checkout makes no claim that KWin clicks or
-focus-bound input work.
+The opt-in prerequisite is now packaged by this flake. Hosts still must run
+`kwin-helper-bridge` on the same Plasma session bus, install/load the KWin
+package, and use `probe-kwin.sh` to verify the live capability publication and
+exact activation/restore transaction before relying on focus-bound input. The
+route remains disabled unless that live handshake is present.
