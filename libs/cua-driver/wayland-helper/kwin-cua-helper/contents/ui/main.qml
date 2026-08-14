@@ -9,18 +9,21 @@ Item {
         id: capabilitiesCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
+        interface: "org.cua.KWinHelper"
     }
 
     DBusCall {
         id: snapshotCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
+        interface: "org.cua.KWinHelper"
     }
 
     DBusCall {
         id: responseCall
         service: "org.cua.KWinHelper"
         path: "/org/cua/KWinHelper"
+        interface: "org.cua.KWinHelper"
     }
 
     Component.onCompleted: {
@@ -37,7 +40,7 @@ Item {
                 } else if (method === "PublishResponse") {
                     call = responseCall;
                 }
-                call.method = "org.cua.KWinHelper." + method;
+                call.method = method;
                 call.arguments = [String(value || "")];
                 call.call();
                 console.log("CUA_KWIN_HELPER: published " + method);
