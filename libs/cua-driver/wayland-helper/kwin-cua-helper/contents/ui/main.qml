@@ -31,7 +31,14 @@ Item {
         Helper.main({
             "workspace": Workspace,
             "readConfig": function(key, fallback) {
-                return KWin.readConfig(key, fallback);
+                if (typeof KWin !== "undefined" && KWin
+                        && typeof KWin.readConfig === "function") {
+                    return KWin.readConfig(key, fallback);
+                }
+                if (typeof readConfig === "function") {
+                    return readConfig(key, fallback);
+                }
+                return fallback;
             },
             "callDBus": function(method, value) {
                 var call = capabilitiesCall;
