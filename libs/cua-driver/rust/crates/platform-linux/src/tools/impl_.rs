@@ -4352,7 +4352,13 @@ impl Tool for ScrollTool {
                 crate::wayland::window_local_to_output(xid, x.round() as i32, y.round() as i32)
             });
             let result = tokio::task::spawn_blocking(move || {
-                crate::wayland::scroll_at(xid, output_point, &direction_for_wayland, amount as u32)
+                crate::wayland::scroll_at(
+                    Some(pid),
+                    xid,
+                    output_point,
+                    &direction_for_wayland,
+                    amount as u32,
+                )
             })
             .await;
             return match result {

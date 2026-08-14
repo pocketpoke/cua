@@ -1430,7 +1430,7 @@ fn click_vptr(
 /// virtual-pointer protocol, mirroring how a real wheel notch decomposes. The
 /// magnitude follows wl_pointer convention: ±10 (in wl_fixed = ×256) per tick.
 pub fn scroll(window_id: u64, direction: &str, amount: u32) -> anyhow::Result<()> {
-    scroll_at(window_id, None, direction, amount)
+    scroll_at(None, window_id, None, direction, amount)
 }
 
 /// Translate window-local screenshot coordinates into compositor output
@@ -1514,6 +1514,7 @@ pub fn window_geometry(window_id: u64) -> Option<(i32, i32, u32, u32)> {
 /// target. Wayland routes wheel events to the surface beneath the pointer, so
 /// pixel-addressed scrolls must not inherit an unrelated cursor position.
 pub fn scroll_at(
+    target_pid: Option<u32>,
     window_id: u64,
     point: Option<(i32, i32)>,
     direction: &str,
@@ -1523,12 +1524,19 @@ pub fn scroll_at(
     with_libei_fallback(
         || scroll_vptr(Some(window_id), point, &direction, amount),
         || {
-            libei_wait_scroll_ready()?;
-            activate_window_for_input(window_id)?;
-            if let Some((x, y)) = point {
-                libei_move_absolute(x, y)?;
+            let send_scroll = || {
+                libei_wait_scroll_ready()?;
+                if let Some((x, y)) = point {
+                    libei_move_absolute(x, y)?;
+                }
+                libei_scroll(&direction, amount)
+            };
+            if let Some(pid) = target_pid {
+                with_target_foreground(pid, window_id, send_scroll)
+            } else {
+                activate_window_for_input(window_id)?;
+                send_scroll()
             }
-            libei_scroll(&direction, amount)
         },
     )
 }
