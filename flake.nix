@@ -24,6 +24,7 @@
           pkgs = import nixpkgs { inherit system; };
 
           rustSrc = ./libs/cua-driver/rust;
+          workspaceVersion = (pkgs.lib.importTOML "${rustSrc}/Cargo.toml").workspace.package.version;
           rustTestSrc = pkgs.lib.fileset.toSource {
             root = ./libs/cua-driver;
             fileset = pkgs.lib.fileset.unions [
@@ -38,6 +39,17 @@
             inherit pkgs;
             src = rustSrc;
           };
+
+          kwinHelperBridgePackage = import ./nix/cua-driver/kwin-helper-bridge.nix {
+            inherit pkgs;
+            src = rustSrc;
+          };
+
+          kwinHelperPackage = pkgs.runCommand "cua-kwin-helper-${workspaceVersion}" { } ''
+            mkdir -p "$out/share/kwin/scripts"
+            cp -r ${./libs/cua-driver/wayland-helper/kwin-cua-helper} \
+              "$out/share/kwin/scripts/cua-kwin-helper"
+          '';
 
           cuaCompositorPackage = pkgs.callPackage ./nix/cua-driver/compositor { };
 
@@ -128,12 +140,15 @@
           packages = {
             cua-compositor = cuaCompositorPackage;
             cua-driver = cuaDriverPackage;
+            kwin-helper = kwinHelperPackage;
+            kwin-helper-bridge = kwinHelperBridgePackage;
             default = cuaDriverPackage;
           };
 
           checks = {
             cua-compositor-build = cuaCompositorPackage;
             cua-driver-build = cuaDriverPackage;
+            kwin-helper-bridge-build = kwinHelperBridgePackage;
             cua-driver-linux-rust-unit = import ./nix/cua-driver/tests/rust-unit.nix {
               inherit pkgs;
               src = rustTestSrc;

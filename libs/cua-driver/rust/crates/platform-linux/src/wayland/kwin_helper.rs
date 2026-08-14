@@ -27,6 +27,11 @@ use crate::x11::WindowInfo;
 const KWIN_HELPER_PROTOCOL_VERSION: u32 = 2;
 const KWIN_HELPER_DEFAULT_CONFIG: &str = "kwinrc";
 const KWIN_HELPER_DEFAULT_GROUP: &str = "Script-cua-kwin-helper";
+const KWIN_HELPER_SERVICE: &str = "org.cua.KWinHelper";
+const KWIN_HELPER_OBJECT: &str = "/org/cua/KWinHelper";
+const KWIN_SCRIPTING_SERVICE: &str = "org.kde.KWin";
+const KWIN_SCRIPTING_OBJECT: &str = "/Scripting";
+const KWIN_HELPER_SCRIPT_ID: &str = "cua-kwin-helper";
 const KEY_CAPABILITIES_JSON: &str = "capabilities_json";
 const KEY_SNAPSHOT_JSON: &str = "snapshot_json";
 const KEY_REQUEST_JSON: &str = "request_json";
@@ -168,10 +173,40 @@ pub fn is_kwin_session() -> bool {
 }
 
 pub fn available() -> bool {
-    helper_capabilities().is_ok() && current_snapshot().is_ok()
+    bridge_is_live()
+        && helper_script_is_loaded()
+        && helper_capabilities().is_ok()
+        && current_snapshot().is_ok()
+}
+
+fn bridge_is_live() -> bool {
+    Command::new("qdbus")
+        .args([KWIN_HELPER_SERVICE, KWIN_HELPER_OBJECT])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn helper_script_is_loaded() -> bool {
+    let output = match Command::new("qdbus")
+        .args([
+            KWIN_SCRIPTING_SERVICE,
+            KWIN_SCRIPTING_OBJECT,
+            "isScriptLoaded",
+            KWIN_HELPER_SCRIPT_ID,
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    matches!(String::from_utf8_lossy(&output.stdout).trim(), "true" | "1")
 }
 
 pub fn list_windows(filter_pid: Option<u32>) -> Option<Vec<WindowInfo>> {
+    if !available() {
+        return None;
+    }
     let snapshot = current_snapshot().ok()?;
     Some(
         snapshot
@@ -238,6 +273,10 @@ pub fn geometry_for_window(window_id: u64) -> Option<(i32, i32, u32, u32)> {
 }
 
 pub fn activate_window(pid: u32, window_id: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        available(),
+        "foreground_unavailable: KWin helper bridge/script is not live"
+    );
     let capabilities = helper_capabilities()?;
     ensure_foreground_capabilities(&capabilities)?;
     let before = current_snapshot()?;
