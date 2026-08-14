@@ -1,0 +1,46 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge trycua/cua main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/trycua/cua.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Fork main already contains upstream main."
+            exit 0
+          fi
+
+          # This fast-forwards when possible and creates a normal merge commit
+          # when the fork contains feature work. Conflicts stop the job before
+          # anything is pushed, leaving main unchanged for manual resolution.
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
